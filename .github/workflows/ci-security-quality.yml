@@ -178,10 +178,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Configurar Go 1.24
+      - name: Configurar Go 1.27
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.27"
           cache-dependency-path: |
             src/catalog/go.sum
             src/orders/go.sum
@@ -196,18 +196,18 @@ jobs:
       - name: golangci-lint (catalog)
         id: lint-catalog
         continue-on-error: true
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: v1.64
+          version: v2.15.0
           working-directory: src/catalog
           args: --config ../../.golangci.yml
 
       - name: golangci-lint (orders)
         id: lint-orders
         continue-on-error: true
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: v1.64
+          version: v2.15.0
           working-directory: src/orders
           args: --config ../../.golangci.yml
 
