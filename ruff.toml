@@ -2,7 +2,7 @@ target-version = "py312"
 line-length = 120
 
 [lint]
-select = ["E", "F", "W", "B", "S", "I", "UP", "C90"]
+select = ["E", "F", "W", "B", "S", "C90"]
 ignore = ["B008"]
 
 [lint.mccabe]
