@@ -28,6 +28,7 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+.yarn/install-state.gz
 
 # Python
 __pycache__/

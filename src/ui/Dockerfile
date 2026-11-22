@@ -19,6 +19,7 @@ COPY --chown=appuser:appgroup public ./public
 COPY --chown=appuser:appgroup package.json ./package.json
 ENV NODE_ENV=production
 ENV PORT=8080
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 USER appuser
 EXPOSE 8080
 CMD ["node", "dist/app.js"]

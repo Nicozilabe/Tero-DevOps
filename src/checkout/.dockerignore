@@ -6,3 +6,4 @@ dist
 Dockerfile
 .dockerignore
 coverage
+.yarn/install-state.gz
