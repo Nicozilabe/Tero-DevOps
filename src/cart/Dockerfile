@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 FROM python:3.12-alpine AS runtime
 WORKDIR /app
-RUN apk add --no-cache libpq \
+RUN apk add --no-cache --upgrade libpq "krb5-libs>=1.22.3-r0" \
     && addgroup -g 10001 -S appgroup \
     && adduser -u 10001 -S appuser -G appgroup
 COPY --from=builder --chown=appuser:appgroup /opt/venv /opt/venv
