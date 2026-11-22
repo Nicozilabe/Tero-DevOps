@@ -1,0 +1,345 @@
+name: CI - Seguridad y Calidad de Código
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - "feat/*"
+      - "fix/*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scanning:
+    name: Detección de secretos (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout completo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Instalar Gitleaks CLI
+        run: |
+          GITLEAKS_VERSION="8.24.2"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Escanear estado actual del repositorio (working tree)
+        run: |
+          gitleaks dir . \
+            --config .gitleaks.toml \
+            --redact \
+            --report-format json \
+            --report-path gitleaks-dir-report.json \
+            --exit-code 1
+
+      - name: Escanear commits nuevos del Pull Request
+        if: github.event_name == 'pull_request'
+        run: |
+          gitleaks git . \
+            --config .gitleaks.toml \
+            --log-opts="${{ github.event.pull_request.base.sha }}..${{ github.sha }}" \
+            --redact \
+            --report-format json \
+            --report-path gitleaks-pr-report.json \
+            --exit-code 1
+
+      - name: Subir reporte Gitleaks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-reports
+          path: gitleaks-*-report.json
+          if-no-files-found: ignore
+
+  sca-trivy-fs:
+    name: SCA de dependencias y config (Trivy FS)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generar reporte JSON completo (SCA + Misconfig)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          format: json
+          output: trivy-fs-report.json
+          trivyignores: .trivyignore
+          exit-code: "0"
+
+      - name: Quality Gate SCA (bloquear CRITICAL y HIGH)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          format: table
+          trivyignores: .trivyignore
+          exit-code: "1"
+
+      - name: Subir reporte Trivy FS
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: trivy-fs-report.json
+          if-no-files-found: warn
+
+  sast-semgrep:
+    name: SAST multi-lenguaje (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar Semgrep
+        run: pip install --quiet semgrep
+
+      - name: Ejecutar análisis SAST con Semgrep
+        run: |
+          semgrep scan \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --config p/dockerfile \
+            --config p/golang \
+            --config p/python \
+            --config p/typescript \
+            --metrics=off \
+            --json \
+            --output semgrep-report.json \
+            .
+
+      - name: Evaluar Quality Gate SAST (bloquear ERROR)
+        run: |
+          python - << 'EOF'
+          import json, os, sys
+          from collections import Counter
+
+          with open("semgrep-report.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          results = data.get("results", [])
+          counts = Counter(r.get("extra", {}).get("severity", "INFO").upper() for r in results)
+
+          summary_lines = [
+              "## Semgrep SAST Summary",
+              "",
+              "| Severidad | Hallazgos |",
+              "|---|---|",
+              f"| ERROR (bloqueante) | {counts.get('ERROR', 0)} |",
+              f"| WARNING | {counts.get('WARNING', 0)} |",
+              f"| INFO | {counts.get('INFO', 0)} |",
+              "",
+          ]
+
+          if results:
+              summary_lines.append("### Detalle de hallazgos (top 30)")
+              for r in results[:30]:
+                  sev = r.get("extra", {}).get("severity", "INFO")
+                  path = r.get("path", "")
+                  line = r.get("start", {}).get("line", 0)
+                  rule = r.get("check_id", "")
+                  msg = r.get("extra", {}).get("message", "").replace("\n", " ")[:160]
+                  summary_lines.append(f"- **[{sev}]** `{path}:{line}` (`{rule}`): {msg}")
+
+          step_summary = os.getenv("GITHUB_STEP_SUMMARY")
+          if step_summary:
+              with open(step_summary, "a", encoding="utf-8") as sf:
+                  sf.write("\n".join(summary_lines) + "\n")
+
+          print("\n".join(summary_lines))
+          if counts.get("ERROR", 0) > 0:
+              print(f"\nQuality Gate FAILED: {counts['ERROR']} hallazgos con severidad ERROR.", file=sys.stderr)
+              sys.exit(1)
+          print("\nQuality Gate PASSED: 0 hallazgos ERROR.")
+          EOF
+
+      - name: Subir reporte Semgrep
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+          if-no-files-found: warn
+
+  code-quality:
+    name: Análisis estático y calidad de código
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Go 1.24
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: |
+            src/catalog/go.sum
+            src/orders/go.sum
+
+      - name: Go vet (catalog y orders)
+        run: |
+          (cd src/catalog && go vet ./...)
+          (cd src/orders && go vet ./...)
+
+      - name: golangci-lint (catalog)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64
+          working-directory: src/catalog
+          args: --config ../../.golangci.yml
+
+      - name: golangci-lint (orders)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64
+          working-directory: src/orders
+          args: --config ../../.golangci.yml
+
+      - name: Configurar Python 3.12 y Ruff (cart)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Ruff lint + Bandit SAST + complejidad (cart)
+        run: |
+          pip install --quiet ruff
+          ruff check src/cart/app --config ruff.toml --output-format github
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: TypeScript typecheck (admin y ui)
+        run: |
+          (cd src/admin && npm install && npx tsc --noEmit)
+          (cd src/ui && npm install && npx tsc --noEmit)
+
+      - name: NestJS build check (checkout)
+        run: |
+          cd src/checkout
+          node .yarn/releases/yarn-4.11.0.cjs install --immutable
+          node .yarn/releases/yarn-4.11.0.cjs build
+
+      - name: Lint de Dockerfiles (Hadolint)
+        run: |
+          for df in src/*/Dockerfile; do
+            echo "Analizando $df..."
+            docker run --rm -i hadolint/hadolint:v2.12.0-alpine hadolint --failure-threshold error - < "$df"
+          done
+
+  docker-build-and-scan:
+    name: Build y escaneo de imagen (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - admin
+          - ui
+          - checkout
+          - cart
+          - catalog
+          - orders
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir imagen local (${{ matrix.service }})
+        uses: docker/build-push-action@v6
+        with:
+          context: ./src/${{ matrix.service }}
+          load: true
+          push: false
+          tags: tero-${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Generar reporte JSON de imagen (Trivy)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: image
+          image-ref: tero-${{ matrix.service }}:ci
+          format: json
+          output: trivy-image-${{ matrix.service }}.json
+          trivyignores: .trivyignore
+          exit-code: "0"
+
+      - name: Quality Gate imagen (bloquear CRITICAL y HIGH)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: image
+          image-ref: tero-${{ matrix.service }}:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          format: table
+          trivyignores: .trivyignore
+          exit-code: "1"
+
+      - name: Subir reporte Trivy imagen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-${{ matrix.service }}
+          path: trivy-image-${{ matrix.service }}.json
+          if-no-files-found: warn
+
+  quality-gate:
+    name: Quality Gate (Seguridad y Calidad)
+    if: always()
+    needs:
+      - secret-scanning
+      - sca-trivy-fs
+      - sast-semgrep
+      - code-quality
+      - docker-build-and-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar resultados de todos los controles
+        run: |
+          {
+            echo "## Quality Gate Global"
+            echo ""
+            echo "| Control | Resultado |"
+            echo "|---|---|"
+            echo "| Secret Scanning (Gitleaks) | ${{ needs.secret-scanning.result }} |"
+            echo "| SCA Dependencias (Trivy FS) | ${{ needs.sca-trivy-fs.result }} |"
+            echo "| SAST Multi-lenguaje (Semgrep) | ${{ needs.sast-semgrep.result }} |"
+            echo "| Calidad Estática y Hadolint | ${{ needs.code-quality.result }} |"
+            echo "| Build + Escaneo Imágenes (Trivy) | ${{ needs.docker-build-and-scan.result }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "${{ needs.secret-scanning.result }}" != "success" || \
+                "${{ needs.sca-trivy-fs.result }}" != "success" || \
+                "${{ needs.sast-semgrep.result }}" != "success" || \
+                "${{ needs.code-quality.result }}" != "success" || \
+                "${{ needs.docker-build-and-scan.result }}" != "success" ]]; then
+            echo "Quality Gate FAILED: al menos un control obligatorio no pasó."
+            exit 1
+          fi
+          echo "Quality Gate PASSED: todos los controles obligatorios pasaron."
