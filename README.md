@@ -11,16 +11,21 @@ Tero es una tienda en línea basada en microservicios. Permite explorar un catá
 
 ## Inicio rápido
 
-```bash
-docker compose up --build
-```
+1. Copiá `.env.example` como `.env` y configurá tus credenciales locales:
+   ```bash
+   cp .env.example .env
+   ```
+2. Levantá los servicios:
+   ```bash
+   docker compose up --build
+   ```
 
 | Servicio | URL                   |
 |----------|-----------------------|
 | Tienda   | http://localhost:8080 |
 | Admin    | http://localhost:8081 |
 
-Credenciales del admin por defecto: `admin` / `admin`
+Las credenciales del panel admin se configuran en `.env` (`ADMIN_USERNAME` / `ADMIN_PASSWORD`).
 
 ## Comandos útiles
 
@@ -133,11 +138,11 @@ docker compose logs -f <servicio>
 | `RETAIL_UI_ENDPOINTS_ORDERS`    | URL del servicio orders      | `http://orders:8080`  |
 
 ### Catalog / Orders / Cart
-| Variable                               | Descripción           | Default          |
-|----------------------------------------|-----------------------|------------------|
-| `RETAIL_CATALOG_PERSISTENCE_PROVIDER`  | Tipo de persistencia  | `postgres`       |
-| `RETAIL_CATALOG_PERSISTENCE_ENDPOINT`  | Host:Puerto de la DB  | `db:5432`        |
-| `DB_PASSWORD`                          | Contraseña PostgreSQL | `retailpassword` |
+| Variable                               | Descripción           | Default                        |
+|----------------------------------------|-----------------------|--------------------------------|
+| `RETAIL_CATALOG_PERSISTENCE_PROVIDER`  | Tipo de persistencia  | `postgres`                     |
+| `RETAIL_CATALOG_PERSISTENCE_ENDPOINT`  | Host:Puerto de la DB  | `db:5432`                      |
+| `DB_PASSWORD`                          | Contraseña PostgreSQL | *(requerida vía `.env` / SSM)* |
 
 ### Checkout
 | Variable                                   | Descripción              | Default               |
@@ -147,11 +152,11 @@ docker compose logs -f <servicio>
 | `RETAIL_CHECKOUT_ENDPOINTS_ORDERS`         | URL del servicio orders  | `http://orders:8080`  |
 
 ### Admin
-| Variable            | Descripción                | Default                   |
-|---------------------|----------------------------|---------------------------|
-| `ADMIN_USERNAME`    | Usuario administrador      | `admin`                   |
-| `ADMIN_PASSWORD`    | Contraseña administrador   | `admin`                   |
-| `ADMIN_JWT_SECRET`  | Secreto para tokens JWT    | `change-me-in-production` |
+| Variable            | Descripción                | Default                        |
+|---------------------|----------------------------|--------------------------------|
+| `ADMIN_USERNAME`    | Usuario administrador      | *(requerida vía `.env` / SSM)* |
+| `ADMIN_PASSWORD`    | Contraseña administrador   | *(requerida vía `.env` / SSM)* |
+| `ADMIN_JWT_SECRET`  | Secreto para tokens JWT    | *(requerida vía `.env` / SSM)* |
 
 ---
 
