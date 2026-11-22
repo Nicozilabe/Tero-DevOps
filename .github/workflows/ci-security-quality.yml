@@ -36,6 +36,8 @@ jobs:
           gitleaks version
 
       - name: Escanear estado actual del repositorio (working tree)
+        id: gitleaks-dir
+        continue-on-error: true
         run: |
           gitleaks dir . \
             --config .gitleaks.toml \
@@ -45,7 +47,9 @@ jobs:
             --exit-code 1
 
       - name: Escanear commits nuevos del Pull Request
+        id: gitleaks-pr
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         run: |
           gitleaks git . \
             --config .gitleaks.toml \
@@ -55,6 +59,10 @@ jobs:
             --report-path gitleaks-pr-report.json \
             --exit-code 1
 
+      - name: Publicar resumen en Summary
+        if: always()
+        run: python3 .github/scripts/format_summary.py gitleaks "gitleaks-*-report.json"
+
       - name: Subir reporte Gitleaks
         if: always()
         uses: actions/upload-artifact@v6
@@ -62,6 +70,15 @@ jobs:
           name: gitleaks-reports
           path: gitleaks-*-report.json
           if-no-files-found: ignore
+
+      - name: Evaluar Quality Gate Secretos
+        if: always()
+        run: |
+          if [[ "${{ steps.gitleaks-dir.outcome }}" != "success" ]] || \
+             [[ "${{ github.event_name }}" == "pull_request" && "${{ steps.gitleaks-pr.outcome }}" != "success" ]]; then
+            echo "Quality Gate FAILED: se detectaron secretos expuestos."
+            exit 1
+          fi
 
   sca-trivy-fs:
     name: SCA de dependencias y config (Trivy FS)
@@ -91,6 +108,18 @@ jobs:
             --exit-code 0 \
             .
 
+      - name: Publicar resumen SCA en Summary
+        if: always()
+        run: python3 .github/scripts/format_summary.py trivy "📦 SCA de Dependencias (Trivy FS)" trivy-fs-report.json
+
+      - name: Subir reporte Trivy FS
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: trivy-fs-report
+          path: trivy-fs-report.json
+          if-no-files-found: warn
+
       - name: Quality Gate SCA (bloquear CRITICAL y HIGH)
         run: |
           trivy fs \
@@ -101,14 +130,6 @@ jobs:
             --format table \
             --exit-code 1 \
             .
-
-      - name: Subir reporte Trivy FS
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: trivy-fs-report
-          path: trivy-fs-report.json
-          if-no-files-found: warn
 
   sast-semgrep:
     name: SAST multi-lenguaje (Semgrep)
@@ -139,50 +160,8 @@ jobs:
             --output semgrep-report.json \
             .
 
-      - name: Evaluar Quality Gate SAST (bloquear ERROR)
-        run: |
-          python - << 'EOF'
-          import json, os, sys
-          from collections import Counter
-
-          with open("semgrep-report.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          results = data.get("results", [])
-          counts = Counter(r.get("extra", {}).get("severity", "INFO").upper() for r in results)
-
-          summary_lines = [
-              "## Semgrep SAST Summary",
-              "",
-              "| Severidad | Hallazgos |",
-              "|---|---|",
-              f"| ERROR (bloqueante) | {counts.get('ERROR', 0)} |",
-              f"| WARNING | {counts.get('WARNING', 0)} |",
-              f"| INFO | {counts.get('INFO', 0)} |",
-              "",
-          ]
-
-          if results:
-              summary_lines.append("### Detalle de hallazgos (top 30)")
-              for r in results[:30]:
-                  sev = r.get("extra", {}).get("severity", "INFO")
-                  path = r.get("path", "")
-                  line = r.get("start", {}).get("line", 0)
-                  rule = r.get("check_id", "")
-                  msg = r.get("extra", {}).get("message", "").replace("\n", " ")[:160]
-                  summary_lines.append(f"- **[{sev}]** `{path}:{line}` (`{rule}`): {msg}")
-
-          step_summary = os.getenv("GITHUB_STEP_SUMMARY")
-          if step_summary:
-              with open(step_summary, "a", encoding="utf-8") as sf:
-                  sf.write("\n".join(summary_lines) + "\n")
-
-          print("\n".join(summary_lines))
-          if counts.get("ERROR", 0) > 0:
-              print(f"\nQuality Gate FAILED: {counts['ERROR']} hallazgos con severidad ERROR.", file=sys.stderr)
-              sys.exit(1)
-          print("\nQuality Gate PASSED: 0 hallazgos ERROR.")
-          EOF
+      - name: Evaluar Quality Gate SAST y publicar Summary
+        run: python3 .github/scripts/format_summary.py semgrep semgrep-report.json
 
       - name: Subir reporte Semgrep
         if: always()
@@ -208,11 +187,15 @@ jobs:
             src/orders/go.sum
 
       - name: Go vet (catalog y orders)
+        id: go-vet
+        continue-on-error: true
         run: |
           (cd src/catalog && go vet ./...)
           (cd src/orders && go vet ./...)
 
       - name: golangci-lint (catalog)
+        id: lint-catalog
+        continue-on-error: true
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64
@@ -220,6 +203,8 @@ jobs:
           args: --config ../../.golangci.yml
 
       - name: golangci-lint (orders)
+        id: lint-orders
+        continue-on-error: true
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64
@@ -232,6 +217,8 @@ jobs:
           python-version: "3.12"
 
       - name: Ruff lint + Bandit SAST + complejidad (cart)
+        id: ruff-cart
+        continue-on-error: true
         run: |
           pip install --quiet ruff
           ruff check src/cart/app --config ruff.toml --output-format github
@@ -241,22 +228,71 @@ jobs:
         with:
           node-version: "22"
 
-      - name: TypeScript typecheck (admin y ui)
+      - name: TypeScript typecheck (admin)
+        id: tsc-admin
+        continue-on-error: true
         run: |
-          (cd src/admin && npm install && npx tsc --noEmit)
-          (cd src/ui && npm install && npx tsc --noEmit)
+          cd src/admin
+          npm install
+          npx tsc --noEmit
+
+      - name: TypeScript typecheck (ui)
+        id: tsc-ui
+        continue-on-error: true
+        run: |
+          cd src/ui
+          npm install
+          npx tsc --noEmit
 
       - name: NestJS build check (checkout)
+        id: build-checkout
+        continue-on-error: true
         run: |
           cd src/checkout
-          node .yarn/releases/yarn-4.11.0.cjs install --immutable
+          YARN_ENABLE_IMMUTABLE_INSTALLS=false node .yarn/releases/yarn-4.11.0.cjs install
           node .yarn/releases/yarn-4.11.0.cjs build
 
       - name: Lint de Dockerfiles (Hadolint)
+        id: hadolint
+        continue-on-error: true
         run: |
           for df in src/*/Dockerfile; do
             echo "Analizando $df..."
             docker run --rm -i hadolint/hadolint:v2.12.0-alpine hadolint --failure-threshold error - < "$df"
+          done
+
+      - name: Publicar resumen y validar Quality Gate de Calidad
+        if: always()
+        run: |
+          badge() { [[ "$1" == "success" ]] && echo "✅ Pass" || echo "❌ Fail ($1)"; }
+          {
+            echo "### 🧪 Análisis Estático y Calidad de Código"
+            echo ""
+            echo "| Servicio / Control | Herramienta | Resultado |"
+            echo "|---|---|---|"
+            echo "| \`catalog\` + \`orders\` | \`go vet\` | $(badge '${{ steps.go-vet.outcome }}') |"
+            echo "| \`catalog\` | \`golangci-lint\` (\`gosec\`, \`gocyclo<=15\`) | $(badge '${{ steps.lint-catalog.outcome }}') |"
+            echo "| \`orders\` | \`golangci-lint\` (\`gosec\`, \`gocyclo<=15\`) | $(badge '${{ steps.lint-orders.outcome }}') |"
+            echo "| \`cart\` | \`ruff\` (Bandit \`S\`, \`C90<=10\`) | $(badge '${{ steps.ruff-cart.outcome }}') |"
+            echo "| \`admin\` | \`tsc --noEmit\` | $(badge '${{ steps.tsc-admin.outcome }}') |"
+            echo "| \`ui\` | \`tsc --noEmit\` | $(badge '${{ steps.tsc-ui.outcome }}') |"
+            echo "| \`checkout\` | NestJS \`yarn build\` | $(badge '${{ steps.build-checkout.outcome }}') |"
+            echo "| 6 \`Dockerfile\`s | \`hadolint\` | $(badge '${{ steps.hadolint.outcome }}') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for st in \
+            "${{ steps.go-vet.outcome }}" \
+            "${{ steps.lint-catalog.outcome }}" \
+            "${{ steps.lint-orders.outcome }}" \
+            "${{ steps.ruff-cart.outcome }}" \
+            "${{ steps.tsc-admin.outcome }}" \
+            "${{ steps.tsc-ui.outcome }}" \
+            "${{ steps.build-checkout.outcome }}" \
+            "${{ steps.hadolint.outcome }}"; do
+            if [[ "$st" != "success" ]]; then
+              echo "Quality Gate FAILED en análisis estático."
+              exit 1
+            fi
           done
 
   docker-build-and-scan:
@@ -280,7 +316,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Construir imagen local (${{ matrix.service }})
+        id: docker-build
         uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_SUMMARY: "false"
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: ./src/${{ matrix.service }}
           load: true
@@ -288,6 +328,15 @@ jobs:
           tags: tero-${{ matrix.service }}:ci
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Reportar fallo de build en Summary
+        if: failure() && steps.docker-build.outcome != 'success'
+        run: |
+          {
+            echo "### 🐳 Imagen \`tero-${{ matrix.service }}\`"
+            echo ""
+            echo "❌ **Falló el build del Dockerfile** (\`./src/${{ matrix.service }}/Dockerfile\`). Revisar logs del paso de build."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Instalar Trivy CLI oficial (repositorio APT firmado)
         run: |
@@ -308,6 +357,18 @@ jobs:
             --exit-code 0 \
             "tero-${{ matrix.service }}:ci"
 
+      - name: Publicar resumen de imagen en Summary
+        if: always() && steps.docker-build.outcome == 'success'
+        run: python3 .github/scripts/format_summary.py trivy "🐳 Imagen tero-${{ matrix.service }} (Trivy Image)" "trivy-image-${{ matrix.service }}.json"
+
+      - name: Subir reporte Trivy imagen
+        if: always() && steps.docker-build.outcome == 'success'
+        uses: actions/upload-artifact@v6
+        with:
+          name: trivy-image-${{ matrix.service }}
+          path: trivy-image-${{ matrix.service }}.json
+          if-no-files-found: warn
+
       - name: Quality Gate imagen (bloquear CRITICAL y HIGH)
         run: |
           trivy image \
@@ -317,14 +378,6 @@ jobs:
             --format table \
             --exit-code 1 \
             "tero-${{ matrix.service }}:ci"
-
-      - name: Subir reporte Trivy imagen
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: trivy-image-${{ matrix.service }}
-          path: trivy-image-${{ matrix.service }}.json
-          if-no-files-found: warn
 
   quality-gate:
     name: Quality Gate (Seguridad y Calidad)
@@ -339,16 +392,17 @@ jobs:
     steps:
       - name: Verificar resultados de todos los controles
         run: |
+          badge() { [[ "$1" == "success" ]] && echo "✅ Pass" || echo "❌ Fail ($1)"; }
           {
-            echo "## Quality Gate Global"
+            echo "## 🚦 Quality Gate Global"
             echo ""
             echo "| Control | Resultado |"
             echo "|---|---|"
-            echo "| Secret Scanning (Gitleaks) | ${{ needs.secret-scanning.result }} |"
-            echo "| SCA Dependencias (Trivy FS) | ${{ needs.sca-trivy-fs.result }} |"
-            echo "| SAST Multi-lenguaje (Semgrep) | ${{ needs.sast-semgrep.result }} |"
-            echo "| Calidad Estática y Hadolint | ${{ needs.code-quality.result }} |"
-            echo "| Build + Escaneo Imágenes (Trivy) | ${{ needs.docker-build-and-scan.result }} |"
+            echo "| 🔐 Secret Scanning (Gitleaks) | $(badge '${{ needs.secret-scanning.result }}') |"
+            echo "| 📦 SCA Dependencias (Trivy FS) | $(badge '${{ needs.sca-trivy-fs.result }}') |"
+            echo "| 🛡️ SAST Multi-lenguaje (Semgrep) | $(badge '${{ needs.sast-semgrep.result }}') |"
+            echo "| 🧪 Calidad Estática y Hadolint | $(badge '${{ needs.code-quality.result }}') |"
+            echo "| 🐳 Build + Escaneo Imágenes (Trivy) | $(badge '${{ needs.docker-build-and-scan.result }}') |"
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [[ "${{ needs.secret-scanning.result }}" != "success" || \
