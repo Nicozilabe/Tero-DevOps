@@ -2,17 +2,17 @@ services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_USER: retail_user
-      POSTGRES_PASSWORD: retailpassword
-      POSTGRES_DB: orders
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-orders}
     volumes:
       - db-data:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "5433:5432"
+    networks:
+      - backend
     healthcheck:
       # -h 127.0.0.1 fuerza TCP: durante el init el server temporal solo escucha en socket Unix
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U retail_user -d orders"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -20,19 +20,29 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   catalog:
     build:
       context: ./src/catalog
     environment:
       GIN_MODE: release
+      APP_VERSION: ${APP_VERSION:-local}
+      ENABLE_CHAOS: ${ENABLE_CHAOS:-false}
       RETAIL_CATALOG_PERSISTENCE_PROVIDER: postgres
       RETAIL_CATALOG_PERSISTENCE_ENDPOINT: db:5432
       RETAIL_CATALOG_PERSISTENCE_DB_NAME: catalogdb
-      RETAIL_CATALOG_PERSISTENCE_USER: retail_user
-      RETAIL_CATALOG_PERSISTENCE_PASSWORD: retailpassword
+      RETAIL_CATALOG_PERSISTENCE_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      RETAIL_CATALOG_PERSISTENCE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      RETAIL_CATALOG_PERSISTENCE_SSLMODE: ${DB_SSLMODE:-disable}
+    networks:
+      - backend
     restart: on-failure
     depends_on:
       db:
@@ -42,13 +52,17 @@ services:
     build:
       context: ./src/cart
     environment:
+      APP_VERSION: ${APP_VERSION:-local}
       CART_PERSISTENCE_PROVIDER: postgres
       CART_POSTGRES_HOST: db
       CART_POSTGRES_PORT: "5432"
       CART_POSTGRES_DB: cartdb
-      CART_POSTGRES_USER: retail_user
-      CART_POSTGRES_PASSWORD: retailpassword
+      CART_POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      CART_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      CART_POSTGRES_SSLMODE: ${DB_SSLMODE:-disable}
       PORT: "8080"
+    networks:
+      - backend
     restart: on-failure
     depends_on:
       db:
@@ -59,10 +73,14 @@ services:
       context: ./src/orders
     environment:
       GIN_MODE: release
+      APP_VERSION: ${APP_VERSION:-local}
       RETAIL_ORDERS_PERSISTENCE_ENDPOINT: db:5432
       RETAIL_ORDERS_PERSISTENCE_NAME: orders
-      RETAIL_ORDERS_PERSISTENCE_USERNAME: retail_user
-      RETAIL_ORDERS_PERSISTENCE_PASSWORD: retailpassword
+      RETAIL_ORDERS_PERSISTENCE_USERNAME: ${POSTGRES_USER:?POSTGRES_USER is required}
+      RETAIL_ORDERS_PERSISTENCE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      RETAIL_ORDERS_PERSISTENCE_SSLMODE: ${DB_SSLMODE:-disable}
+    networks:
+      - backend
     restart: on-failure
     depends_on:
       db:
@@ -72,24 +90,33 @@ services:
     build:
       context: ./src/checkout
     environment:
+      APP_VERSION: ${APP_VERSION:-local}
       RETAIL_CHECKOUT_PERSISTENCE_PROVIDER: redis
       RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL: redis://redis:6379
       RETAIL_CHECKOUT_ENDPOINTS_ORDERS: http://orders:8080
+    networks:
+      - backend
     restart: on-failure
     depends_on:
-      - redis
-      - orders
+      redis:
+        condition: service_healthy
+      orders:
+        condition: service_started
 
   ui:
     build:
       context: ./src/ui
     environment:
+      APP_VERSION: ${APP_VERSION:-local}
       RETAIL_UI_ENDPOINTS_CATALOG:  http://catalog:8080
       RETAIL_UI_ENDPOINTS_CARTS:    http://carts:8080
       RETAIL_UI_ENDPOINTS_CHECKOUT: http://checkout:8080
       RETAIL_UI_ENDPOINTS_ORDERS:   http://orders:8080
     ports:
       - "8080:8080"
+    networks:
+      - frontend
+      - backend
     depends_on:
       - catalog
       - carts
@@ -100,15 +127,21 @@ services:
     build:
       context: ./src/admin
     environment:
+      APP_VERSION: ${APP_VERSION:-local}
       DB_HOST: db
       DB_PORT: "5432"
-      DB_USER: retail_user
-      DB_PASSWORD: retailpassword
-      ADMIN_USERNAME: admin
-      ADMIN_PASSWORD: admin
-      ADMIN_JWT_SECRET: change-me-in-production
+      DB_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DB_SSLMODE: ${DB_SSLMODE:-disable}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:?ADMIN_USERNAME is required}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:?ADMIN_JWT_SECRET is required}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     ports:
       - "8081:8080"
+    networks:
+      - frontend
+      - backend
     restart: on-failure
     depends_on:
       db:
@@ -116,3 +149,8 @@ services:
 
 volumes:
   db-data:
+
+networks:
+  frontend:
+  backend:
+    internal: true

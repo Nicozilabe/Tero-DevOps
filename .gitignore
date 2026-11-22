@@ -1,0 +1,48 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+
+# Local working documents & assignment brief (kept outside Git repo)
+DECISIONES.md
+Obligatorio-*.pdf
+
+# Terraform
+**/.terraform/
+**/.build/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars.local
+crash.log
+override.tf
+override.tf.json
+
+# Node.js / TypeScript
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Go binaries & test outputs
+src/catalog/catalog
+src/orders/orders
+*.out
+
+# Logs, OS & IDE files
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
