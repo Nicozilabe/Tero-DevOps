@@ -8,6 +8,7 @@
 secrets/
 
 # Local working documents & assignment brief (kept outside Git repo)
+AGENTS.md
 DECISIONES.md
 Obligatorio-*.pdf
 
