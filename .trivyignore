@@ -1,0 +1,8 @@
+# Lista de excepciones de vulnerabilidades o misconfiguraciones para Trivy.
+# Política del equipo (ADR-007):
+# - Ningún CVE de severidad CRITICAL o HIGH sin justificación documentada debe ignorarse.
+# - Toda excepción temporal debe incluir: ID del CVE, fecha de expiración (exp:YYYY-MM-DD)
+#   y motivo técnico / mitigación aplicada.
+#
+# Formato ejemplo:
+# CVE-2024-XXXXX exp:2026-12-31 # Motivo: ...

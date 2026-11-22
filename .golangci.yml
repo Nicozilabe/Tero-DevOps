@@ -1,0 +1,17 @@
+run:
+  timeout: 3m
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosec
+    - gocyclo
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15
