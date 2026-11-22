@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -40,6 +42,7 @@ import (
 // @BasePath /
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	ctx := context.Background()
 
 	_, otelPresent := os.LookupEnv("OTEL_SERVICE_NAME")
@@ -67,8 +70,33 @@ func main() {
 	}
 
 	r := gin.New()
+	r.Use(gin.Recovery())
 	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
-		SkipPaths: []string{"/health"},
+		SkipPaths: []string{"/health", "/metrics"},
+		Formatter: func(param gin.LogFormatterParams) string {
+			level := "info"
+			if param.StatusCode >= 500 {
+				level = "error"
+			} else if param.StatusCode >= 400 {
+				level = "warn"
+			}
+			entry := map[string]any{
+				"timestamp":   param.TimeStamp.UTC().Format(time.RFC3339Nano),
+				"level":       level,
+				"service":     "catalog",
+				"event":       "http_request",
+				"method":      param.Method,
+				"path":        param.Path,
+				"status":      param.StatusCode,
+				"duration_ms": float64(param.Latency.Microseconds()) / 1000.0,
+				"client_ip":   param.ClientIP,
+			}
+			b, err := json.Marshal(entry)
+			if err != nil {
+				return ""
+			}
+			return string(b) + "\n"
+		},
 	}))
 
 	p := ginprometheus.NewPrometheus("gin")
@@ -80,8 +108,9 @@ func main() {
 	}
 
 	chaosController := middleware.NewChaosController()
-
-	chaosController.SetupChaosRoutes(r)
+	if config.EnableChaos {
+		chaosController.SetupChaosRoutes(r)
+	}
 
 	catalog := r.Group("/catalog")
 
@@ -96,11 +125,19 @@ func main() {
 
 	r.GET("/health", func(c *gin.Context) {
 		if !chaosController.IsHealthy() {
-			c.AbortWithError(503, fmt.Errorf("health check failed"))
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status":  "unhealthy",
+				"service": "catalog",
+				"version": config.Version,
+			})
 			return
 		}
 
-		c.String(http.StatusOK, "OK")
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "ok",
+			"service": "catalog",
+			"version": config.Version,
+		})
 	})
 
 	r.GET("/topology", func(c *gin.Context) {
@@ -120,6 +157,8 @@ func main() {
 		Addr:    ":" + strconv.Itoa(config.Port),
 		Handler: r,
 	}
+
+	slog.Info("server_started", "service", "catalog", "port", config.Port, "version", config.Version, "chaos_enabled", config.EnableChaos)
 
 	// Initializing the server in a goroutine so that
 	// it won't block the graceful shutdown handling below

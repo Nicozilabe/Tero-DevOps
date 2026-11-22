@@ -32,8 +32,12 @@ func createPostgreSQLDatabase(config config.DatabaseConfiguration) (*gorm.DB, er
 		host = parts[0]
 		port = parts[1]
 	}
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable connect_timeout=%d",
-		host, port, config.User, config.Password, config.Name, config.ConnectTimeout)
+	sslMode := config.SSLMode
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s connect_timeout=%d",
+		host, port, config.User, config.Password, config.Name, sslMode, config.ConnectTimeout)
 
 	var db *gorm.DB
 	var err error

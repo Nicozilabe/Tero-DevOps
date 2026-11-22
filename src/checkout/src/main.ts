@@ -9,5 +9,15 @@ async function bootstrap() {
 
   const port = process.env.PORT || 8080;
   await app.listen(port);
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: 'info',
+      service: 'checkout',
+      event: 'server_started',
+      port,
+      version: process.env.APP_VERSION || 'unknown',
+    }),
+  );
 }
 bootstrap();

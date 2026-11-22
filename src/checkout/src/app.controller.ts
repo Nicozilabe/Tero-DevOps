@@ -7,7 +7,11 @@ export class AppController {
 
   @Get('health')
   health() {
-    return { status: 'ok' };
+    return {
+      status: 'ok',
+      service: 'checkout',
+      version: process.env.APP_VERSION || 'unknown',
+    };
   }
 
   @Get('topology')
