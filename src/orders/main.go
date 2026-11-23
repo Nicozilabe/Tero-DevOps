@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -58,6 +60,7 @@ type CreateOrderRequest struct {
 var db *gorm.DB
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	dsn := buildDSN()
 
 	var err error
@@ -66,7 +69,7 @@ func main() {
 		if err == nil {
 			break
 		}
-		fmt.Printf("Waiting for PostgreSQL... (%v)\n", err)
+		slog.Warn("waiting_for_postgres", "service", "orders", "attempt", i+1, "error", err.Error())
 		time.Sleep(5 * time.Second)
 	}
 	if err != nil {
@@ -77,19 +80,54 @@ func main() {
 		log.Fatal("Failed to migrate schema:", err)
 	}
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+		SkipPaths: []string{"/health", "/metrics"},
+		Formatter: func(param gin.LogFormatterParams) string {
+			level := "info"
+			if param.StatusCode >= 500 {
+				level = "error"
+			} else if param.StatusCode >= 400 {
+				level = "warn"
+			}
+			entry := map[string]any{
+				"timestamp":   param.TimeStamp.UTC().Format(time.RFC3339Nano),
+				"level":       level,
+				"service":     "orders",
+				"event":       "http_request",
+				"method":      param.Method,
+				"path":        param.Path,
+				"status":      param.StatusCode,
+				"duration_ms": float64(param.Latency.Microseconds()) / 1000.0,
+				"client_ip":   param.ClientIP,
+			}
+			b, err := json.Marshal(entry)
+			if err != nil {
+				return ""
+			}
+			return string(b) + "\n"
+		},
+	}))
 
 	p := ginprometheus.NewPrometheus("gin")
 	p.Use(r)
 
+	version := getEnv("APP_VERSION", "unknown")
+
 	r.GET("/health", func(c *gin.Context) {
-		c.String(http.StatusOK, "OK")
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "ok",
+			"service": "orders",
+			"version": version,
+		})
 	})
 
 	r.GET("/orders", listOrders)
 	r.POST("/orders", createOrder)
 
 	port := getEnv("PORT", "8080")
+	slog.Info("server_started", "service", "orders", "port", port, "version", version)
 	if err := r.Run(":" + port); err != nil {
 		log.Fatal(err)
 	}
@@ -143,11 +181,12 @@ func buildDSN() string {
 		port = endpoint[idx+1:]
 	}
 	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		host, port,
 		getEnv("RETAIL_ORDERS_PERSISTENCE_USERNAME", "retail_user"),
 		os.Getenv("RETAIL_ORDERS_PERSISTENCE_PASSWORD"),
 		getEnv("RETAIL_ORDERS_PERSISTENCE_NAME", "orders"),
+		getEnv("RETAIL_ORDERS_PERSISTENCE_SSLMODE", "disable"),
 	)
 }
 

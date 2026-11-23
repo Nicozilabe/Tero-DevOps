@@ -13,6 +13,7 @@ class PostgresCartService(CartService):
             dbname=settings.postgres_db,
             user=settings.postgres_user,
             password=settings.postgres_password,
+            sslmode=settings.postgres_sslmode,
         )
         self._conn.autocommit = True
 

@@ -2,8 +2,10 @@ package config
 
 // Configuration exported
 type AppConfiguration struct {
-	Port     int `env:"PORT,default=8080"`
-	Database DatabaseConfiguration
+	Port        int    `env:"PORT,default=8080"`
+	Version     string `env:"APP_VERSION,default=unknown"`
+	EnableChaos bool   `env:"ENABLE_CHAOS,default=false"`
+	Database    DatabaseConfiguration
 }
 
 // DatabaseConfiguration exported
@@ -13,5 +15,6 @@ type DatabaseConfiguration struct {
 	Name           string `env:"RETAIL_CATALOG_PERSISTENCE_DB_NAME,default=catalogdb"`
 	User           string `env:"RETAIL_CATALOG_PERSISTENCE_USER,default=catalog_user"`
 	Password       string `env:"RETAIL_CATALOG_PERSISTENCE_PASSWORD"`
+	SSLMode        string `env:"RETAIL_CATALOG_PERSISTENCE_SSLMODE,default=disable"`
 	ConnectTimeout int    `env:"RETAIL_CATALOG_PERSISTENCE_CONNECT_TIMEOUT,default=5"`
 }
