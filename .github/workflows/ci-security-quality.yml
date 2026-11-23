@@ -1,0 +1,416 @@
+name: CI - Seguridad y Calidad de Código
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - "feat/*"
+      - "fix/*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scanning:
+    name: Detección de secretos (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout completo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Instalar Gitleaks CLI
+        run: |
+          GITLEAKS_VERSION="8.24.2"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Escanear estado actual del repositorio (working tree)
+        id: gitleaks-dir
+        continue-on-error: true
+        run: |
+          gitleaks dir . \
+            --config .gitleaks.toml \
+            --redact \
+            --report-format json \
+            --report-path gitleaks-dir-report.json \
+            --exit-code 1
+
+      - name: Escanear commits nuevos del Pull Request
+        id: gitleaks-pr
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          gitleaks git . \
+            --config .gitleaks.toml \
+            --log-opts="${{ github.event.pull_request.base.sha }}..${{ github.sha }}" \
+            --redact \
+            --report-format json \
+            --report-path gitleaks-pr-report.json \
+            --exit-code 1
+
+      - name: Publicar resumen en Summary
+        if: always()
+        run: python3 .github/scripts/format_summary.py gitleaks "gitleaks-*-report.json"
+
+      - name: Subir reporte Gitleaks
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gitleaks-reports
+          path: gitleaks-*-report.json
+          if-no-files-found: ignore
+
+      - name: Evaluar Quality Gate Secretos
+        if: always()
+        run: |
+          if [[ "${{ steps.gitleaks-dir.outcome }}" != "success" ]] || \
+             [[ "${{ github.event_name }}" == "pull_request" && "${{ steps.gitleaks-pr.outcome }}" != "success" ]]; then
+            echo "Quality Gate FAILED: se detectaron secretos expuestos."
+            exit 1
+          fi
+
+  sca-trivy-fs:
+    name: SCA de dependencias y config (Trivy FS)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Instalar Trivy CLI oficial (repositorio APT firmado)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /etc/apt/keyrings/trivy.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq trivy
+          trivy --version
+
+      - name: Generar reporte JSON completo (SCA + Misconfig)
+        run: |
+          trivy fs \
+            --scanners vuln,misconfig \
+            --ignorefile .trivyignore \
+            --format json \
+            --output trivy-fs-report.json \
+            --exit-code 0 \
+            .
+
+      - name: Publicar resumen SCA en Summary
+        if: always()
+        run: python3 .github/scripts/format_summary.py trivy "📦 SCA de Dependencias (Trivy FS)" trivy-fs-report.json
+
+      - name: Subir reporte Trivy FS
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: trivy-fs-report
+          path: trivy-fs-report.json
+          if-no-files-found: warn
+
+      - name: Quality Gate SCA (bloquear CRITICAL y HIGH)
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed=false \
+            --ignorefile .trivyignore \
+            --format table \
+            --exit-code 1 \
+            .
+
+  sast-semgrep:
+    name: SAST multi-lenguaje (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar Semgrep
+        run: pip install --quiet semgrep
+
+      - name: Ejecutar análisis SAST con Semgrep
+        run: |
+          semgrep scan \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --config p/dockerfile \
+            --config p/golang \
+            --config p/python \
+            --config p/typescript \
+            --metrics=off \
+            --json \
+            --output semgrep-report.json \
+            .
+
+      - name: Evaluar Quality Gate SAST y publicar Summary
+        run: python3 .github/scripts/format_summary.py semgrep semgrep-report.json
+
+      - name: Subir reporte Semgrep
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+          if-no-files-found: warn
+
+  code-quality:
+    name: Análisis estático y calidad de código
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Go 1.27
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: |
+            src/catalog/go.sum
+            src/orders/go.sum
+
+      - name: Go vet (catalog y orders)
+        id: go-vet
+        continue-on-error: true
+        run: |
+          (cd src/catalog && go vet ./...)
+          (cd src/orders && go vet ./...)
+
+      - name: golangci-lint (catalog)
+        id: lint-catalog
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.15.0
+          working-directory: src/catalog
+          args: --config ../../.golangci.yml
+
+      - name: golangci-lint (orders)
+        id: lint-orders
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.15.0
+          working-directory: src/orders
+          args: --config ../../.golangci.yml
+
+      - name: Configurar Python 3.12 y Ruff (cart)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Ruff lint + Bandit SAST + complejidad (cart)
+        id: ruff-cart
+        continue-on-error: true
+        run: |
+          pip install --quiet ruff
+          ruff check src/cart/app --config ruff.toml --output-format github
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: TypeScript typecheck (admin)
+        id: tsc-admin
+        continue-on-error: true
+        run: |
+          cd src/admin
+          npm install
+          npx tsc --noEmit
+
+      - name: TypeScript typecheck (ui)
+        id: tsc-ui
+        continue-on-error: true
+        run: |
+          cd src/ui
+          npm install
+          npx tsc --noEmit
+
+      - name: NestJS build check (checkout)
+        id: build-checkout
+        continue-on-error: true
+        run: |
+          cd src/checkout
+          YARN_ENABLE_IMMUTABLE_INSTALLS=false node .yarn/releases/yarn-4.11.0.cjs install
+          node .yarn/releases/yarn-4.11.0.cjs build
+
+      - name: Lint de Dockerfiles (Hadolint)
+        id: hadolint
+        continue-on-error: true
+        run: |
+          for df in src/*/Dockerfile; do
+            echo "Analizando $df..."
+            docker run --rm -i hadolint/hadolint:v2.12.0-alpine hadolint --failure-threshold error - < "$df"
+          done
+
+      - name: Publicar resumen y validar Quality Gate de Calidad
+        if: always()
+        run: |
+          badge() { [[ "$1" == "success" ]] && echo "✅ Pass" || echo "❌ Fail ($1)"; }
+          {
+            echo "### 🧪 Análisis Estático y Calidad de Código"
+            echo ""
+            echo "| Servicio / Control | Herramienta | Resultado |"
+            echo "|---|---|---|"
+            echo "| \`catalog\` + \`orders\` | \`go vet\` | $(badge '${{ steps.go-vet.outcome }}') |"
+            echo "| \`catalog\` | \`golangci-lint\` (\`gosec\`, \`gocyclo<=15\`) | $(badge '${{ steps.lint-catalog.outcome }}') |"
+            echo "| \`orders\` | \`golangci-lint\` (\`gosec\`, \`gocyclo<=15\`) | $(badge '${{ steps.lint-orders.outcome }}') |"
+            echo "| \`cart\` | \`ruff\` (Bandit \`S\`, \`C90<=10\`) | $(badge '${{ steps.ruff-cart.outcome }}') |"
+            echo "| \`admin\` | \`tsc --noEmit\` | $(badge '${{ steps.tsc-admin.outcome }}') |"
+            echo "| \`ui\` | \`tsc --noEmit\` | $(badge '${{ steps.tsc-ui.outcome }}') |"
+            echo "| \`checkout\` | NestJS \`yarn build\` | $(badge '${{ steps.build-checkout.outcome }}') |"
+            echo "| 6 \`Dockerfile\`s | \`hadolint\` | $(badge '${{ steps.hadolint.outcome }}') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for st in \
+            "${{ steps.go-vet.outcome }}" \
+            "${{ steps.lint-catalog.outcome }}" \
+            "${{ steps.lint-orders.outcome }}" \
+            "${{ steps.ruff-cart.outcome }}" \
+            "${{ steps.tsc-admin.outcome }}" \
+            "${{ steps.tsc-ui.outcome }}" \
+            "${{ steps.build-checkout.outcome }}" \
+            "${{ steps.hadolint.outcome }}"; do
+            if [[ "$st" != "success" ]]; then
+              echo "Quality Gate FAILED en análisis estático."
+              exit 1
+            fi
+          done
+
+  docker-build-and-scan:
+    name: Build y escaneo de imagen (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - admin
+          - ui
+          - checkout
+          - cart
+          - catalog
+          - orders
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir imagen local (${{ matrix.service }})
+        id: docker-build
+        uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_SUMMARY: "false"
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: ./src/${{ matrix.service }}
+          load: true
+          push: false
+          tags: tero-${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Reportar fallo de build en Summary
+        if: failure() && steps.docker-build.outcome != 'success'
+        run: |
+          {
+            echo "### 🐳 Imagen \`tero-${{ matrix.service }}\`"
+            echo ""
+            echo "❌ **Falló el build del Dockerfile** (\`./src/${{ matrix.service }}/Dockerfile\`). Revisar logs del paso de build."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Instalar Trivy CLI oficial (repositorio APT firmado)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /etc/apt/keyrings/trivy.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq trivy
+
+      - name: Generar reporte JSON de imagen (Trivy)
+        run: |
+          trivy image \
+            --ignorefile .trivyignore \
+            --format json \
+            --output "trivy-image-${{ matrix.service }}.json" \
+            --exit-code 0 \
+            "tero-${{ matrix.service }}:ci"
+
+      - name: Publicar resumen de imagen en Summary
+        if: always() && steps.docker-build.outcome == 'success'
+        run: python3 .github/scripts/format_summary.py trivy "🐳 Imagen tero-${{ matrix.service }} (Trivy Image)" "trivy-image-${{ matrix.service }}.json"
+
+      - name: Subir reporte Trivy imagen
+        if: always() && steps.docker-build.outcome == 'success'
+        uses: actions/upload-artifact@v6
+        with:
+          name: trivy-image-${{ matrix.service }}
+          path: trivy-image-${{ matrix.service }}.json
+          if-no-files-found: warn
+
+      - name: Quality Gate imagen (bloquear CRITICAL y HIGH)
+        run: |
+          trivy image \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed=false \
+            --ignorefile .trivyignore \
+            --format table \
+            --exit-code 1 \
+            "tero-${{ matrix.service }}:ci"
+
+  quality-gate:
+    name: Quality Gate (Seguridad y Calidad)
+    if: always()
+    needs:
+      - secret-scanning
+      - sca-trivy-fs
+      - sast-semgrep
+      - code-quality
+      - docker-build-and-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar resultados de todos los controles
+        run: |
+          badge() { [[ "$1" == "success" ]] && echo "✅ Pass" || echo "❌ Fail ($1)"; }
+          {
+            echo "## 🚦 Quality Gate Global"
+            echo ""
+            echo "| Control | Resultado |"
+            echo "|---|---|"
+            echo "| 🔐 Secret Scanning (Gitleaks) | $(badge '${{ needs.secret-scanning.result }}') |"
+            echo "| 📦 SCA Dependencias (Trivy FS) | $(badge '${{ needs.sca-trivy-fs.result }}') |"
+            echo "| 🛡️ SAST Multi-lenguaje (Semgrep) | $(badge '${{ needs.sast-semgrep.result }}') |"
+            echo "| 🧪 Calidad Estática y Hadolint | $(badge '${{ needs.code-quality.result }}') |"
+            echo "| 🐳 Build + Escaneo Imágenes (Trivy) | $(badge '${{ needs.docker-build-and-scan.result }}') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "${{ needs.secret-scanning.result }}" != "success" || \
+                "${{ needs.sca-trivy-fs.result }}" != "success" || \
+                "${{ needs.sast-semgrep.result }}" != "success" || \
+                "${{ needs.code-quality.result }}" != "success" || \
+                "${{ needs.docker-build-and-scan.result }}" != "success" ]]; then
+            echo "Quality Gate FAILED: al menos un control obligatorio no pasó."
+            exit 1
+          fi
+          echo "Quality Gate PASSED: todos los controles obligatorios pasaron."

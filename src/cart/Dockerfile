@@ -1,13 +1,16 @@
-FROM python:3.12-slim AS builder
+FROM python:3.12-alpine AS builder
 WORKDIR /app
+RUN apk add --no-cache gcc musl-dev postgresql-dev
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-alpine AS runtime
 WORKDIR /app
-RUN groupadd -g 10001 appgroup && useradd -u 10001 -g appgroup -m -s /usr/sbin/nologin appuser
+RUN apk add --no-cache --upgrade libpq "krb5-libs>=1.22.3-r0" \
+    && addgroup -g 10001 -S appgroup \
+    && adduser -u 10001 -S appuser -G appgroup
 COPY --from=builder --chown=appuser:appgroup /opt/venv /opt/venv
 COPY --chown=appuser:appgroup app ./app
 ENV PATH="/opt/venv/bin:$PATH"

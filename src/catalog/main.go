@@ -45,33 +45,126 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	ctx := context.Background()
 
-	_, otelPresent := os.LookupEnv("OTEL_SERVICE_NAME")
-
-	if otelPresent {
-		_, err := initTracer(ctx)
-		if err != nil {
+	if _, otelPresent := os.LookupEnv("OTEL_SERVICE_NAME"); otelPresent {
+		if _, err := initTracer(ctx); err != nil {
 			log.Fatal(err)
 		}
 	}
 
-	var config config.AppConfiguration
-	if err := envconfig.Process(ctx, &config); err != nil {
+	var cfg config.AppConfiguration
+	if err := envconfig.Process(ctx, &cfg); err != nil {
 		log.Fatal(err)
 	}
 
-	db, err := repository.NewRepository(config.Database)
+	db, err := repository.NewRepository(cfg.Database)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	api, err := api.NewCatalogAPI(db)
+	catalogAPI, err := api.NewCatalogAPI(db)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	c, err := controller.NewController(catalogAPI)
+	if err != nil {
+		log.Fatalln("Error creating controller", err)
+	}
+
+	chaosController := middleware.NewChaosController()
+	r := setupRouter(cfg, c, chaosController)
+
+	srv := &http.Server{
+		Addr:              ":" + strconv.Itoa(cfg.Port),
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	slog.Info("server_started", "service", "catalog", "port", cfg.Port, "version", cfg.Version, "chaos_enabled", cfg.EnableChaos)
+
+	// Initializing the server in a goroutine so that
+	// it won't block the graceful shutdown handling below
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shutdown the server with
+	// a timeout of 5 seconds.
+	quit := make(chan os.Signal, 1)
+	// kill (no param) default send syscall.SIGTERM
+	// kill -2 is syscall.SIGINT
+	// kill -9 is syscall.SIGKILL but can't be catch, so don't need add it
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	// The context is used to inform the server it has 5 seconds to finish
+	// the request it is currently handling
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
+	}
+
+	log.Println("Server exiting")
+}
+
+func setupRouter(cfg config.AppConfiguration, c *controller.Controller, chaosController *middleware.ChaosController) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+	r.Use(gin.LoggerWithConfig(newJSONLoggerConfig()))
+
+	p := ginprometheus.NewPrometheus("gin")
+	p.Use(r)
+
+	if cfg.EnableChaos {
+		chaosController.SetupChaosRoutes(r)
+	}
+
+	catalog := r.Group("/catalog")
+	catalog.Use(chaosController.ChaosMiddleware())
+	catalog.Use(otelgin.Middleware("catalog-server"))
+
+	catalog.GET("/products", c.GetProducts)
+	catalog.GET("/size", c.CatalogSize)
+	catalog.GET("/tags", c.ListTags)
+	catalog.GET("/products/:id", c.GetProduct)
+
+	r.GET("/health", func(c *gin.Context) {
+		if !chaosController.IsHealthy() {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status":  "unhealthy",
+				"service": "catalog",
+				"version": cfg.Version,
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "ok",
+			"service": "catalog",
+			"version": cfg.Version,
+		})
+	})
+
+	r.GET("/topology", func(c *gin.Context) {
+		topology := map[string]string{
+			"persistenceProvider": cfg.Database.Type,
+			"databaseEndpoint":    "N/A",
+		}
+		if cfg.Database.Type != "in-memory" {
+			topology["databaseEndpoint"] = cfg.Database.Endpoint
+		}
+		c.JSON(http.StatusOK, topology)
+	})
+
+	return r
+}
+
+func newJSONLoggerConfig() gin.LoggerConfig {
+	return gin.LoggerConfig{
 		SkipPaths: []string{"/health", "/metrics"},
 		Formatter: func(param gin.LogFormatterParams) string {
 			level := "info"
@@ -97,96 +190,7 @@ func main() {
 			}
 			return string(b) + "\n"
 		},
-	}))
-
-	p := ginprometheus.NewPrometheus("gin")
-	p.Use(r)
-
-	c, err := controller.NewController(api)
-	if err != nil {
-		log.Fatalln("Error creating controller", err)
 	}
-
-	chaosController := middleware.NewChaosController()
-	if config.EnableChaos {
-		chaosController.SetupChaosRoutes(r)
-	}
-
-	catalog := r.Group("/catalog")
-
-	catalog.Use(chaosController.ChaosMiddleware())
-	catalog.Use(otelgin.Middleware("catalog-server"))
-
-	catalog.GET("/products", c.GetProducts)
-
-	catalog.GET("/size", c.CatalogSize)
-	catalog.GET("/tags", c.ListTags)
-	catalog.GET("/products/:id", c.GetProduct)
-
-	r.GET("/health", func(c *gin.Context) {
-		if !chaosController.IsHealthy() {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"status":  "unhealthy",
-				"service": "catalog",
-				"version": config.Version,
-			})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"service": "catalog",
-			"version": config.Version,
-		})
-	})
-
-	r.GET("/topology", func(c *gin.Context) {
-		topology := make(map[string]string)
-
-		topology["persistenceProvider"] = config.Database.Type
-		topology["databaseEndpoint"] = "N/A"
-
-		if config.Database.Type != "in-memory" {
-			topology["databaseEndpoint"] = config.Database.Endpoint
-		}
-
-		c.JSON(http.StatusOK, topology)
-	})
-
-	srv := &http.Server{
-		Addr:    ":" + strconv.Itoa(config.Port),
-		Handler: r,
-	}
-
-	slog.Info("server_started", "service", "catalog", "port", config.Port, "version", config.Version, "chaos_enabled", config.EnableChaos)
-
-	// Initializing the server in a goroutine so that
-	// it won't block the graceful shutdown handling below
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
-		}
-	}()
-
-	// Wait for interrupt signal to gracefully shutdown the server with
-	// a timeout of 5 seconds.
-	quit := make(chan os.Signal, 1)
-	// kill (no param) default send syscall.SIGTERM
-	// kill -2 is syscall.SIGINT
-	// kill -9 is syscall.SIGKILL but can't be catch, so don't need add it
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutting down server...")
-
-	// The context is used to inform the server it has 5 seconds to finish
-	// the request it is currently handling
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatal("Server forced to shutdown:", err)
-	}
-
-	log.Println("Server exiting")
 }
 
 func initTracer(ctx context.Context) (*sdktrace.TracerProvider, error) {

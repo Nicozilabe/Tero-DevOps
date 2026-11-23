@@ -1,0 +1,14 @@
+.git/
+.yarn/
+node_modules/
+dist/
+build/
+coverage/
+__pycache__/
+.venv/
+venv/
+.terraform/
+**/.build/
+*.lock
+go.sum
+*.min.js

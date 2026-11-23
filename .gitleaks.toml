@@ -1,0 +1,22 @@
+title = "Tero Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "tero-legacy-default-secrets"
+description = "Detecta credenciales hardcodeadas del repositorio original de Tero"
+regex = '''(?i)(retailpassword|change-me-in-production)'''
+tags = ["secret", "tero-audit"]
+
+[allowlist]
+description = "Ignorar hashes de lockfiles, placeholders de .env.example y este archivo de reglas"
+paths = [
+  '''(^|/)\.gitleaks\.toml$''',
+  '''(^|/)yarn\.lock$''',
+  '''(^|/)go\.sum$''',
+  '''src/checkout/\.yarn/releases/.*''',
+]
+regexes = [
+  '''CHANGE_ME_LOCAL_[A-Z0-9_]+''',
+]

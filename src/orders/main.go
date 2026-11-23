@@ -82,7 +82,38 @@ func main() {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+	r.Use(gin.LoggerWithConfig(newJSONLoggerConfig()))
+
+	p := ginprometheus.NewPrometheus("gin")
+	p.Use(r)
+
+	version := getEnv("APP_VERSION", "unknown")
+
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "ok",
+			"service": "orders",
+			"version": version,
+		})
+	})
+
+	r.GET("/orders", listOrders)
+	r.POST("/orders", createOrder)
+
+	port := getEnv("PORT", "8080")
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	slog.Info("server_started", "service", "orders", "port", port, "version", version)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+}
+
+func newJSONLoggerConfig() gin.LoggerConfig {
+	return gin.LoggerConfig{
 		SkipPaths: []string{"/health", "/metrics"},
 		Formatter: func(param gin.LogFormatterParams) string {
 			level := "info"
@@ -108,28 +139,6 @@ func main() {
 			}
 			return string(b) + "\n"
 		},
-	}))
-
-	p := ginprometheus.NewPrometheus("gin")
-	p.Use(r)
-
-	version := getEnv("APP_VERSION", "unknown")
-
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"service": "orders",
-			"version": version,
-		})
-	})
-
-	r.GET("/orders", listOrders)
-	r.POST("/orders", createOrder)
-
-	port := getEnv("PORT", "8080")
-	slog.Info("server_started", "service", "orders", "port", port, "version", version)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatal(err)
 	}
 }
 
@@ -169,7 +178,10 @@ func createOrder(c *gin.Context) {
 
 func listOrders(c *gin.Context) {
 	var orders []Order
-	db.Preload("Items").Order("created_at desc").Find(&orders)
+	if err := db.Preload("Items").Order("created_at desc").Find(&orders).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, orders)
 }
 
