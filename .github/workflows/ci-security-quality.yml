@@ -216,12 +216,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Ruff lint + Bandit SAST + complejidad (cart)
+      - name: Ruff lint + Bandit SAST + complejidad (cart y lambda)
         id: ruff-cart
         continue-on-error: true
         run: |
           pip install --quiet ruff
-          ruff check src/cart/app --config ruff.toml --output-format github
+          ruff check src/cart/app infra/modules/serverless/lambda --config ruff.toml --output-format github
 
       - name: Configurar Node.js 22
         uses: actions/setup-node@v6
@@ -261,6 +261,20 @@ jobs:
             docker run --rm -i hadolint/hadolint:v2.12.0-alpine hadolint --failure-threshold error - < "$df"
           done
 
+      - name: Configurar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform fmt, validate y test (infra)
+        id: terraform-check
+        continue-on-error: true
+        run: |
+          terraform fmt -check -recursive infra
+          terraform -chdir=infra init -backend=false
+          terraform -chdir=infra validate
+          terraform -chdir=infra test
+
       - name: Publicar resumen y validar Quality Gate de Calidad
         if: always()
         run: |
@@ -273,11 +287,12 @@ jobs:
             echo "| \`catalog\` + \`orders\` | \`go vet\` | $(badge '${{ steps.go-vet.outcome }}') |"
             echo "| \`catalog\` | \`golangci-lint\` (\`gosec\`, \`gocyclo<=15\`) | $(badge '${{ steps.lint-catalog.outcome }}') |"
             echo "| \`orders\` | \`golangci-lint\` (\`gosec\`, \`gocyclo<=15\`) | $(badge '${{ steps.lint-orders.outcome }}') |"
-            echo "| \`cart\` | \`ruff\` (Bandit \`S\`, \`C90<=10\`) | $(badge '${{ steps.ruff-cart.outcome }}') |"
+            echo "| \`cart\` + \`lambda\` | \`ruff\` (Bandit \`S\`, \`C90<=10\`) | $(badge '${{ steps.ruff-cart.outcome }}') |"
             echo "| \`admin\` | \`tsc --noEmit\` | $(badge '${{ steps.tsc-admin.outcome }}') |"
             echo "| \`ui\` | \`tsc --noEmit\` | $(badge '${{ steps.tsc-ui.outcome }}') |"
             echo "| \`checkout\` | NestJS \`yarn build\` | $(badge '${{ steps.build-checkout.outcome }}') |"
             echo "| 6 \`Dockerfile\`s | \`hadolint\` | $(badge '${{ steps.hadolint.outcome }}') |"
+            echo "| \`infra\` (Terraform) | \`fmt\`, \`validate\`, \`test\` | $(badge '${{ steps.terraform-check.outcome }}') |"
           } >> "$GITHUB_STEP_SUMMARY"
 
           for st in \
@@ -288,7 +303,8 @@ jobs:
             "${{ steps.tsc-admin.outcome }}" \
             "${{ steps.tsc-ui.outcome }}" \
             "${{ steps.build-checkout.outcome }}" \
-            "${{ steps.hadolint.outcome }}"; do
+            "${{ steps.hadolint.outcome }}" \
+            "${{ steps.terraform-check.outcome }}"; do
             if [[ "$st" != "success" ]]; then
               echo "Quality Gate FAILED en análisis estático."
               exit 1
