@@ -216,12 +216,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Ruff lint + Bandit SAST + complejidad (cart)
+      - name: Ruff lint + Bandit SAST + complejidad (cart y lambda)
         id: ruff-cart
         continue-on-error: true
         run: |
           pip install --quiet ruff
-          ruff check src/cart/app --config ruff.toml --output-format github
+          ruff check src/cart/app infra/modules/serverless/lambda --config ruff.toml --output-format github
 
       - name: Configurar Node.js 22
         uses: actions/setup-node@v6
@@ -273,7 +273,7 @@ jobs:
             echo "| \`catalog\` + \`orders\` | \`go vet\` | $(badge '${{ steps.go-vet.outcome }}') |"
             echo "| \`catalog\` | \`golangci-lint\` (\`gosec\`, \`gocyclo<=15\`) | $(badge '${{ steps.lint-catalog.outcome }}') |"
             echo "| \`orders\` | \`golangci-lint\` (\`gosec\`, \`gocyclo<=15\`) | $(badge '${{ steps.lint-orders.outcome }}') |"
-            echo "| \`cart\` | \`ruff\` (Bandit \`S\`, \`C90<=10\`) | $(badge '${{ steps.ruff-cart.outcome }}') |"
+            echo "| \`cart\` + \`lambda\` | \`ruff\` (Bandit \`S\`, \`C90<=10\`) | $(badge '${{ steps.ruff-cart.outcome }}') |"
             echo "| \`admin\` | \`tsc --noEmit\` | $(badge '${{ steps.tsc-admin.outcome }}') |"
             echo "| \`ui\` | \`tsc --noEmit\` | $(badge '${{ steps.tsc-ui.outcome }}') |"
             echo "| \`checkout\` | NestJS \`yarn build\` | $(badge '${{ steps.build-checkout.outcome }}') |"
@@ -294,6 +294,64 @@ jobs:
               exit 1
             fi
           done
+
+  terraform-quality:
+    name: Infraestructura IaC (Terraform)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Verificar formato (terraform fmt)
+        id: tf-fmt
+        continue-on-error: true
+        run: terraform fmt -check -recursive infra
+
+      - name: Inicializar y validar (terraform validate)
+        id: tf-validate
+        continue-on-error: true
+        run: |
+          terraform -chdir=infra init -backend=false
+          terraform -chdir=infra validate
+
+      - name: Ejecutar tests unitarios (terraform test)
+        id: tf-test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          terraform -chdir=infra test -no-color | tee tf-test.log
+
+      - name: Publicar resumen y validar Quality Gate de Terraform
+        if: always()
+        run: |
+          badge() { [[ "$1" == "success" ]] && echo "✅ Pass" || echo "❌ Fail ($1)"; }
+          {
+            echo "### 🏗️ Infraestructura IaC (Terraform)"
+            echo ""
+            echo "| Control | Resultado |"
+            echo "|---|---|"
+            echo '| Formato (`terraform fmt -check`) | '"$(badge '${{ steps.tf-fmt.outcome }}')"' |'
+            echo '| Validación (`terraform validate`) | '"$(badge '${{ steps.tf-validate.outcome }}')"' |'
+            echo '| Tests unitarios (`terraform test`) | '"$(badge '${{ steps.tf-test.outcome }}')"' |'
+            if [[ -f tf-test.log ]]; then
+              echo ""
+              echo '```text'
+              cat tf-test.log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "${{ steps.tf-fmt.outcome }}" != "success" || \
+                "${{ steps.tf-validate.outcome }}" != "success" || \
+                "${{ steps.tf-test.outcome }}" != "success" ]]; then
+            echo "Quality Gate FAILED en Terraform."
+            exit 1
+          fi
 
   docker-build-and-scan:
     name: Build y escaneo de imagen (${{ matrix.service }})
@@ -387,6 +445,7 @@ jobs:
       - sca-trivy-fs
       - sast-semgrep
       - code-quality
+      - terraform-quality
       - docker-build-and-scan
     runs-on: ubuntu-latest
     steps:
@@ -402,6 +461,7 @@ jobs:
             echo "| 📦 SCA Dependencias (Trivy FS) | $(badge '${{ needs.sca-trivy-fs.result }}') |"
             echo "| 🛡️ SAST Multi-lenguaje (Semgrep) | $(badge '${{ needs.sast-semgrep.result }}') |"
             echo "| 🧪 Calidad Estática y Hadolint | $(badge '${{ needs.code-quality.result }}') |"
+            echo "| 🏗️ Infraestructura IaC (Terraform) | $(badge '${{ needs.terraform-quality.result }}') |"
             echo "| 🐳 Build + Escaneo Imágenes (Trivy) | $(badge '${{ needs.docker-build-and-scan.result }}') |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -409,6 +469,7 @@ jobs:
                 "${{ needs.sca-trivy-fs.result }}" != "success" || \
                 "${{ needs.sast-semgrep.result }}" != "success" || \
                 "${{ needs.code-quality.result }}" != "success" || \
+                "${{ needs.terraform-quality.result }}" != "success" || \
                 "${{ needs.docker-build-and-scan.result }}" != "success" ]]; then
             echo "Quality Gate FAILED: al menos un control obligatorio no pasó."
             exit 1
